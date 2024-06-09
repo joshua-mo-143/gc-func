@@ -1,67 +1,97 @@
 use hyper::{
     header::{HeaderValue, CONTENT_TYPE},
-    rt::{Future, Stream},
+    Body, Method, Request, Response, StatusCode,
 };
-use hyper::{Body, Request, Response};
-use serde::{
-    de::{Deserializer, Error, Visitor},
-    Deserialize,
-};
-use std::fmt;
+use serde::{Deserialize, Serialize};
 
 const PHRASE: &str = "Hello from RUST by GreenCloud!";
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize, Debug)]
 struct Thing {
     message: String,
 }
 
-//struct StringVis;
-//
-//impl<'de> Visitor<'de> for StringVis {
-//    type Value = String;
-//
-//    fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
-//        formatter.write_str("a UTF-8 string")
-//    }
-//
-//    fn visit_string<E>(self, value: String) -> Result<Self::Value, E>
-//    where
-//        E: Error,
-//    {
-//        Ok(value)
-//    }
-//}
-//
-//impl<'de> Deserialize<'de> for Thing {
-//    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-//    where
-//        D: Deserializer<'de>,
-//    {
-//        let message = deserializer.deserialize_string(StringVis)?;
-//
-//        Ok(Self { message })
-//    }
-//}
+pub async fn handle(req: Request<Body>) -> Result<Response<Body>, ApiError> {
+    let (parts, body) = req.into_parts();
 
-pub fn handle(req: Request<Body>) -> Result<Response<Body>, Box<dyn std::error::Error>> {
-    println!("Hello world!");
-    let body = req
-        .into_body()
-        .concat2()
-        .wait()
-        .unwrap()
-        .into_bytes()
-        .to_vec();
+    match parts.method {
+        Method::POST => {}
+        _ => return Ok(Resp::NotPostMethod.into()),
+    }
 
-    let _meme: Thing = serde_json::from_slice(&body).unwrap();
+    let body = hyper::body::to_bytes(body).await?;
 
-    let mut response = Response::new(Body::from(PHRASE));
+    let thing: Thing = match serde_json::from_slice(&body) {
+        Ok(res) => res,
+        Err(e) => return Ok(Resp::SerdeJsonError(e).into()),
+    };
 
-    let content_type_header = HeaderValue::from_static("text/plain");
-    response
-        .headers_mut()
-        .insert(CONTENT_TYPE, content_type_header);
+    Ok(Resp::OkThing(thing).into())
+}
 
-    Ok(response)
+#[derive(Debug)]
+pub enum ApiError {
+    Hyper(hyper::Error),
+}
+
+impl std::error::Error for ApiError {}
+
+impl From<hyper::Error> for ApiError {
+    fn from(e: hyper::Error) -> Self {
+        Self::Hyper(e)
+    }
+}
+
+use std::fmt;
+
+impl fmt::Display for ApiError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Hyper(err) => write!(f, "hyper error: {err}"),
+        }
+    }
+}
+
+#[derive(Debug)]
+enum Resp {
+    OkThing(Thing),
+    NotPostMethod,
+    SerdeJsonError(serde_json::Error),
+}
+
+impl From<serde_json::Error> for Resp {
+    fn from(e: serde_json::Error) -> Self {
+        Self::SerdeJsonError(e)
+    }
+}
+
+impl From<Resp> for Response<Body> {
+    fn from(resp: Resp) -> Response<Body> {
+        let (response_text, content_type, status_code) = match resp {
+            Resp::OkThing(thing) => (
+                serde_json::to_string_pretty(&thing).unwrap().into_bytes(),
+                HeaderValue::from_static("application/json"),
+                StatusCode::OK,
+            ),
+            Resp::NotPostMethod => (
+                b"This endpoint only accepts POST methods!".to_vec(),
+                HeaderValue::from_static("text/plain"),
+                StatusCode::METHOD_NOT_ALLOWED,
+            ),
+
+            Resp::SerdeJsonError(err) => (
+                format!("serde_json error: {err}").into_bytes(),
+                HeaderValue::from_static("text/plain"),
+                StatusCode::METHOD_NOT_ALLOWED,
+            ),
+        };
+
+        let mut response = Response::new(Body::from(response_text));
+
+        response.headers_mut().insert(CONTENT_TYPE, content_type);
+
+        *response.status_mut() = status_code;
+
+        response
+    }
 }
